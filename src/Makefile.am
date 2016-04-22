@@ -1727,6 +1727,11 @@ test_framework_SOURCES = examples/test_framework.cpp
 test_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
 test_framework_LDADD = libmesos.la $(LDADD)
 
+check_PROGRAMS += gpu-framework
+gpu_framework_SOURCES = examples/gpu_framework.cpp
+gpu_framework_CPPFLAGS = $(MESOS_CPPFLAGS)
+gpu_framework_LDADD = libmesos.la $(LDADD)
+
 check_PROGRAMS += test-executor
 test_executor_SOURCES = examples/test_executor.cpp
 test_executor_CPPFLAGS = $(MESOS_CPPFLAGS)
