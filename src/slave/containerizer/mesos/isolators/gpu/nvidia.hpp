@@ -72,12 +72,12 @@ namespace slave {
 //
 // TODO(klueska): Move generic device isolation logic
 // out into its own component.
-class CgroupsNvidiaGpuIsolatorProcess : public MesosIsolatorProcess
+class NvidiaGpuIsolatorProcess : public MesosIsolatorProcess
 {
 public:
   static Try<mesos::slave::Isolator*> create(const Flags& flags);
 
-  virtual ~CgroupsNvidiaGpuIsolatorProcess();
+  virtual ~NvidiaGpuIsolatorProcess();
 
   virtual process::Future<Nothing> recover(
       const std::list<mesos::slave::ContainerState>& states,
@@ -121,7 +121,7 @@ private:
     std::list<Gpu> allocated;
   };
 
-  CgroupsNvidiaGpuIsolatorProcess(
+  NvidiaGpuIsolatorProcess(
       const Flags& _flags,
       const std::string& hierarchy,
       std::list<Gpu> gpus);
