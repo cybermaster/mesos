@@ -40,6 +40,7 @@
 #include "slave/containerizer/mesos/isolator.hpp"
 
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
+#include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
 
 using cgroups::devices::Entry;
 
@@ -134,51 +135,34 @@ NvidiaGpuIsolatorProcess::NvidiaGpuIsolatorProcess(
     available(gpus) {}
 
 
-NvidiaGpuIsolatorProcess::~NvidiaGpuIsolatorProcess()
-{
-  nvmlReturn_t result = nvmlShutdown();
-  if (result != NVML_SUCCESS) {
-    LOG(ERROR) << "nvmlShutdown failed: " << nvmlErrorString(result);
-  }
-}
-
-
 Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
 {
-  // Initialize NVML.
-  nvmlReturn_t result = nvmlInit();
-  if (result != NVML_SUCCESS) {
-    return Error("nvmlInit failed: " +  string(nvmlErrorString(result)));
+  Try<Nothing> initialized = NvidiaManagementLibrary::initialize();
+  if (initialized.isError()) {
+    return Error(initialized.error());
   }
 
   // Enumerate all available GPU devices.
   list<Gpu> gpus;
 
   if (flags.nvidia_gpu_devices.isSome()) {
-    foreach (unsigned int device, flags.nvidia_gpu_devices.get()) {
-      nvmlDevice_t handle;
-      result = nvmlDeviceGetHandleByIndex(device, &handle);
+    foreach (unsigned int index, flags.nvidia_gpu_devices.get()) {
+      const NvidiaManagementLibrary& nvml = NvidiaManagementLibrary::nvml();
 
-      if (result == NVML_ERROR_INVALID_ARGUMENT) {
-        return Error("GPU device " + stringify(device) + " not found");
-      }
-      if (result != NVML_SUCCESS) {
-        return Error("nvmlDeviceGetHandleByIndex failed: " +
-                     string(nvmlErrorString(result)));
+      Try<nvmlDevice_t> handle = nvml.deviceGetHandleByIndex(index);
+      if (handle.isError()) {
+        return Error(handle.error());
       }
 
-      unsigned int minor;
-      result = nvmlDeviceGetMinorNumber(handle, &minor);
-
-      if (result != NVML_SUCCESS) {
-        return Error("nvmlDeviceGetMinorNumber failed: " +
-                     string(nvmlErrorString(result)));
+      Try<unsigned int> minor = nvml.deviceGetMinorNumber(handle.get());
+      if (minor.isError()) {
+        return Error(minor.error());
       }
 
       Gpu gpu;
-      gpu.handle = handle;
+      gpu.handle = handle.get();
       gpu.major = NVIDIA_MAJOR_DEVICE;
-      gpu.minor = minor;
+      gpu.minor = minor.get();
 
       gpus.push_back(gpu);
     }
