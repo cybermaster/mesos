@@ -37,6 +37,8 @@
 
 #include "slave/flags.hpp"
 
+#include "slave/containerizer/containerizer.hpp"
+
 #include "slave/containerizer/mesos/isolator.hpp"
 
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
@@ -49,6 +51,8 @@ using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerLimitation;
 using mesos::slave::ContainerState;
 using mesos::slave::Isolator;
+
+using mesos::internal::slave::Containerizer;
 
 using process::Failure;
 using process::Future;
@@ -142,30 +146,53 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
     return Error(initialized.error());
   }
 
-  // Enumerate all available GPU devices.
-  list<Gpu> gpus;
+  // Grab the full list of resources computed for this containerizer
+  // and filter it down to just the GPU resources.
+  //
+  // TODO(klueska): This is a really heavy-weight way of getting at
+  // the number of GPU resources we are supposed to manage. However,
+  // it is better than duplicating the large amount of code it takes
+  // to do the GPU enumeration here, including all of the error
+  // handling. We need to figure out a better architecture for sharing
+  // the GPU enumeration code here.
+  Try<Resources> resources = Containerizer::resources(flags);
+  if (resources.isError()) {
+    return Error(resources.error());
+  }
+
+  // Figure out the list of GPUs to make available by their index.
+  vector<unsigned int> indices;
 
   if (flags.nvidia_gpu_devices.isSome()) {
-    foreach (unsigned int index, flags.nvidia_gpu_devices.get()) {
-      const NvidiaManagementLibrary& nvml = NvidiaManagementLibrary::nvml();
-
-      Try<nvmlDevice_t> handle = nvml.deviceGetHandleByIndex(index);
-      if (handle.isError()) {
-        return Error(handle.error());
-      }
-
-      Try<unsigned int> minor = nvml.deviceGetMinorNumber(handle.get());
-      if (minor.isError()) {
-        return Error(minor.error());
-      }
-
-      Gpu gpu;
-      gpu.handle = handle.get();
-      gpu.major = NVIDIA_MAJOR_DEVICE;
-      gpu.minor = minor.get();
-
-      gpus.push_back(gpu);
+    indices = flags.nvidia_gpu_devices.get();
+  } else if (resources->gpus().isSome()) {
+    for (unsigned int i = 0; i < resources->gpus().get(); ++i) {
+      indices.push_back(i);
     }
+  }
+
+  // Build the list of available GPUs using the ids computed above.
+  list<Gpu> gpus;
+
+  foreach (unsigned int index, indices) {
+    const NvidiaManagementLibrary& nvml = NvidiaManagementLibrary::nvml();
+
+    Try<nvmlDevice_t> handle = nvml.deviceGetHandleByIndex(index);
+    if (handle.isError()) {
+      return Error(handle.error());
+    }
+
+    Try<unsigned int> minor = nvml.deviceGetMinorNumber(handle.get());
+    if (minor.isError()) {
+      return Error(minor.error());
+    }
+
+    Gpu gpu;
+    gpu.handle = handle.get();
+    gpu.major = NVIDIA_MAJOR_DEVICE;
+    gpu.minor = minor.get();
+
+    gpus.push_back(gpu);
   }
 
   // Prepare the cgroups device hierarchy.
