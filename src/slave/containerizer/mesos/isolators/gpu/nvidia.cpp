@@ -71,40 +71,15 @@ namespace slave {
 // TODO(klueska): Expand this when we support other GPU types.
 static constexpr dev_t NVIDIA_MAJOR_DEVICE = 195;
 
-// We also need to grant/revoke access to both /dev/nvidiactl
-// and /dev/nvidia-uvm when we grant/revoke access to GPUs in
-// a container.
-//
-// TODO(klueska): For now, we hard code the major/minor
-// numbers for these devices. In the future we should use
-// stat() on the device path.
-static const cgroups::devices::Entry* NVIDIA_CTL_DEVICE_ENTRY =
-  new cgroups::devices::Entry({
-      .selector = {
-        .type = Entry::Selector::Type::CHARACTER,
-        .major = NVIDIA_MAJOR_DEVICE,
-        .minor = 255,
-      },
-      .access = {
-        .read = true,
-        .write = true,
-        .mknod = true,
-      }
-    });
-
-static const cgroups::devices::Entry* NVIDIA_UVM_DEVICE_ENTRY =
-  new cgroups::devices::Entry({
-      .selector = {
-        .type = Entry::Selector::Type::CHARACTER,
-        .major = 246, // Nvidia uses the local/experimental device range.
-        .minor = 0,
-      },
-      .access = {
-        .read = true,
-        .write = true,
-        .mknod = true,
-      }
-    });
+// We need to grant/revoke access to both `/dev/nvidiactl` and
+// `/dev/nvidia-uvm` when we grant/revoke access to GPUs in a
+// container. Unfortunately, we can't make these const because we need
+// to calculate the major/minor device numbers for these entries in
+// ::create() using os::stat::rdev().
+static cgroups::devices::Entry* NVIDIA_CTL_DEVICE_ENTRY =
+  new cgroups::devices::Entry();
+static cgroups::devices::Entry* NVIDIA_UVM_DEVICE_ENTRY =
+  new cgroups::devices::Entry();
 
 // The default list of devices to whitelist when device isolation is
 // turned on. The full list of devices can be found here:
@@ -194,6 +169,30 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
 
     gpus.push_back(gpu);
   }
+
+  // Populate the device entries for
+  // `/dev/nvidiactl` and `/dev/nvidia-uvm`.
+  Try<dev_t> device = os::stat::rdev("/dev/nvidiactl");
+  if (device.isError()) {
+    return Error(device.error());
+  }
+  NVIDIA_CTL_DEVICE_ENTRY->selector.type = Entry::Selector::Type::CHARACTER;
+  NVIDIA_CTL_DEVICE_ENTRY->selector.major = major(device.get());
+  NVIDIA_CTL_DEVICE_ENTRY->selector.minor = minor(device.get());
+  NVIDIA_CTL_DEVICE_ENTRY->access.read = true;
+  NVIDIA_CTL_DEVICE_ENTRY->access.write = true;
+  NVIDIA_CTL_DEVICE_ENTRY->access.mknod = true;
+
+  device = os::stat::rdev("/dev/nvidia-uvm");
+  if (device.isError()) {
+    return Error(device.error());
+  }
+  NVIDIA_UVM_DEVICE_ENTRY->selector.type = Entry::Selector::Type::CHARACTER;
+  NVIDIA_UVM_DEVICE_ENTRY->selector.major = major(device.get());
+  NVIDIA_UVM_DEVICE_ENTRY->selector.minor = minor(device.get());
+  NVIDIA_UVM_DEVICE_ENTRY->access.read = true;
+  NVIDIA_UVM_DEVICE_ENTRY->access.write = true;
+  NVIDIA_UVM_DEVICE_ENTRY->access.mknod = true;
 
   // Prepare the cgroups device hierarchy.
   //
