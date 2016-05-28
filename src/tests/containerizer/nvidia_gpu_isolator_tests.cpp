@@ -36,13 +36,17 @@
 #include "slave/containerizer/containerizer.hpp"
 #include "slave/containerizer/fetcher.hpp"
 
+#include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
+
 #include "tests/mesos.hpp"
 
 using mesos::internal::master::Master;
 
+using mesos::internal::slave::Containerizer;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::MesosContainerizer;
 using mesos::internal::slave::MesosContainerizerProcess;
+using mesos::internal::slave::NvidiaManagementLibrary;
 using mesos::internal::slave::Slave;
 
 using mesos::master::detector::MasterDetector;
@@ -222,6 +226,100 @@ TEST_F(NvidiaGpuTest, ROOT_CGROUPS_NVIDIA_GPU_FractionalResources)
 
   driver.stop();
   driver.join();
+}
+
+
+// Test proper enumeration of available GPU devices.
+TEST_F(NvidiaGpuTest, ROOT_CGROUPS_NVIDIA_GPU_VerifyResources)
+{
+  ASSERT_TRUE(NvidiaManagementLibrary::isAvailable());
+
+  // Get the number of GPUs actually on this machine using NVML.
+  Try<unsigned int> gpus = NvidiaManagementLibrary::nvml().deviceGetCount();
+  ASSERT_SOME(gpus);
+
+  // Set the `gpus` resource flag to 0.
+  slave::Flags flags = CreateSlaveFlags();
+  flags.resources = "gpus:0";
+
+  Try<Resources> resources = Containerizer::resources(flags);
+
+  ASSERT_SOME(resources);
+  ASSERT_NONE(resources->gpus());
+
+  // Don't set either `nvidia_gpu_devices` or the `gpus` resource flag.
+  flags = CreateSlaveFlags();
+  flags.resources = "cpus:1"; // To override the default with gpus:0.
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_SOME(resources);
+  ASSERT_SOME(resources->gpus());
+  ASSERT_EQ(gpus.get(), resources->gpus().get());
+
+  // Set both the `nvidia_gpu_devices` and `gpus` resource flags.
+  flags = CreateSlaveFlags();
+  flags.nvidia_gpu_devices = vector<unsigned int>({0u});
+  flags.resources = "gpus:1";
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_SOME(resources);
+  ASSERT_SOME(resources->gpus());
+  ASSERT_EQ(1u, resources->gpus().get());
+
+  // Set `nvidia_gpu_devices` but don't set the `gpus` resource flag.
+  flags = CreateSlaveFlags();
+  flags.nvidia_gpu_devices = vector<unsigned int>({0u});
+  flags.resources = "cpus:1"; // To override the default with gpus:0.
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
+
+  // Don't set `nvidia_gpu_devices` but do set the `gpus` resource flag.
+  flags = CreateSlaveFlags();
+  flags.resources = "gpus:" + stringify(gpus.get());
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
+
+  // Set `nvidia_gpu_devices` and the `gpus`
+  // resource flags to conflicting values.
+  flags = CreateSlaveFlags();
+  flags.nvidia_gpu_devices = vector<unsigned int>({0u});
+  flags.resources = "gpus:2";
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
+
+  // Set `nvidia_gpu_devices` when the `gpus` resource is 0.
+  flags = CreateSlaveFlags();
+  flags.nvidia_gpu_devices = vector<unsigned int>({0u});
+  flags.resources = "gpus:0";
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
+
+  // Set the `gpus` resource flag to 1000000.
+  flags = CreateSlaveFlags();
+  flags.resources = "gpus:1000000";
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
+
+  // Set `nvidia_gpu_devices` to contain repeated values.
+  flags = CreateSlaveFlags();
+  flags.nvidia_gpu_devices = vector<unsigned int>({0u, 0u});
+  flags.resources = "cpus:1"; // To override the default with gpus:0.
+
+  resources = Containerizer::resources(flags);
+
+  ASSERT_ERROR(resources);
 }
 
 } // namespace tests {
