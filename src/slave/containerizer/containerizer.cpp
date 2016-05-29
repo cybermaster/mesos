@@ -44,6 +44,7 @@
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 #endif // __linux__
 #ifdef ENABLE_NVIDIA_GPU_SUPPORT
+#include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
 #include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
 #endif // ENABLE_NVIDIA_GPU_SUPPORT
 
@@ -98,85 +99,16 @@ Try<Resources> Containerizer::resources(const Flags& flags)
 
 #ifdef ENABLE_NVIDIA_GPU_SUPPORT
   // GPU resource.
-  // To determine the proper number of GPU resources to return, we
-  // need to check both the `gpus` resource flag and the
-  // `nvidia_gpu_devices` flag. There are two cases to consider:
-  // either both flags are set or neither flag is set. If both flags
-  // are set, we need to make sure the value in the `gpus` resource is
-  // equal to the number of items in the `nvidia_gpu_resources` flag.
-  // If neither flag is set, we do auto-discovery of GPUs using the
-  // Nvidia management Library (NVML).  We special case specifying
-  // `gpus:0` to not allow setting `nvidia_gpu_devices` for obvious
-  // reasons. In all cases, we only enumerate GPU resources if we can
-  // access NVML at all.
   if (NvidiaManagementLibrary::isAvailable()) {
-    Try<Nothing> initialized = NvidiaManagementLibrary::initialize();
-    if (initialized.isError()) {
-      return Error(initialized.error());
+    Try<Resources> gpus = NvidiaGpuAllocator::resources(flags);
+    if (gpus.isError()) {
+      return Error(gpus.error());
     }
 
-    Try<unsigned int> available =
-      NvidiaManagementLibrary::nvml().deviceGetCount();
-    if (available.isError()) {
-      return Error(available.error());
-    }
-
-    if (strings::contains(flags.resources.getOrElse(""), "gpus")) {
-      if (flags.nvidia_gpu_devices.isSome() && !resources.gpus().isSome()) {
-        return Error("The `--nvidia_gpus_devices` flag cannot be specified"
-                     " when the `gpus` resource is set to 0");
-      }
-
-      if (!flags.nvidia_gpu_devices.isSome() && resources.gpus().isSome()) {
-        return Error("The `gpus` resource can not be set without also"
-                     " setting the `--nvidia_gpu_devices` flag");
-      }
-
-      if (resources.gpus().isSome()) {
-        // Make sure that the value of `gpus` is an integer and not a
-        // fractional amount. We take advantage of the fact that we know
-        // the value of `gpus` is only precise up to 3 decimals.
-        long long milli = static_cast<long long>(resources.gpus().get() * 1000);
-        if ((milli % 1000) != 0) {
-          return Error("The `gpus` resource must be an unsigned integer");
-        }
-
-        // Make sure the `nvidia_gpu_devices` flag
-        // contains a list of unique GPU identifiers.
-        vector<unsigned int> unique = flags.nvidia_gpu_devices.get();
-        std::sort(unique.begin(), unique.end());
-        auto last = std::unique(unique.begin(), unique.end());
-        unique.erase(last, unique.end());
-
-        if (unique.size() != flags.nvidia_gpu_devices->size()) {
-          return Error("The `nvidia_gpu_devices` flag must contain"
-                       " a list of unique GPU identifiers");
-        }
-
-        if (flags.nvidia_gpu_devices->size() != resources.gpus().get()) {
-          return Error("The number of GPUs passed in the '--nvidia_gpu_devices'"
-                       " flag must match the number of GPUs specified in the"
-                       "'gpus' resource");
-        }
-
-        if (resources.gpus().get() > available.get()) {
-          return Error("The number of GPUs requested is greater than"
-                       " the number of GPUs available on the machine");
-        }
-      }
-    } else {
-      if (flags.nvidia_gpu_devices.isSome()) {
-        return Error("The `--nvidia_gpus_devices` flag cannot be set"
-                     " without also setting the `gpus` resource");
-      }
-
-      // When doing aut-discovery, we use the NVML device
-      // count to set the number of available GPU resources.
-      resources += Resources::parse(
-          "gpus",
-          stringify(available.get()),
-          flags.default_role).get();
-    }
+    resources = gpus.get() + resources.filter(
+        [=](const Resource& resource) {
+          return resource.name() != "gpus";
+        });
   }
 #endif // ENABLE_NVIDIA_GPU_SUPPORT
 
