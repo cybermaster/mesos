@@ -386,6 +386,22 @@ Future<Option<ContainerLaunchInfo>> NvidiaGpuIsolatorProcess::prepare(
     }
   }
 
+  // Grant access to /dev/nvidiactl and /dev/nvida-uvm
+  map<string, const cgroups::devices::Entry*> entries = {
+    { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
+    { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
+  };
+
+  foreachkey (const string& device, entries) {
+    Try<Nothing> allow = cgroups::devices::allow(
+        hierarchy, info->cgroup, *entries[device]);
+
+    if (allow.isError()) {
+      return Failure("Failed to grant cgroups access to"
+                     " '" + device + "': " + allow.error());
+    }
+  }
+
   return update(containerId, containerConfig.executor_info().resources())
     .then([]() -> Future<Option<ContainerLaunchInfo>> {
       return None();
@@ -449,25 +465,6 @@ Future<Nothing> NvidiaGpuIsolatorProcess::update(
                          " " + stringify(additional) + " additional GPUs");
         }
 
-        // Grant access to /dev/nvidiactl and /dev/nvida-uvm
-        // if this container is about to get its first GPU.
-        if (info->allocated.empty()) {
-          map<string, const cgroups::devices::Entry*> entries = {
-            { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
-            { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
-          };
-
-          foreachkey (const string& device, entries) {
-            Try<Nothing> allow = cgroups::devices::allow(
-                hierarchy, info->cgroup, *entries[device]);
-
-            if (allow.isError()) {
-              return Failure("Failed to grant cgroups access to"
-                             " '" + device + "': " + allow.error());
-            }
-          }
-        }
-
         foreach (const Gpu& gpu, allocated.get()) {
           cgroups::devices::Entry entry;
           entry.selector.type = Entry::Selector::Type::CHARACTER;
@@ -518,29 +515,7 @@ Future<Nothing> NvidiaGpuIsolatorProcess::update(
       info->allocated.pop_front();
     }
 
-    return allocator->deallocate(deallocated)
-      .then([=] () -> Future<Nothing> {
-        // Revoke access from /dev/nvidiactl and /dev/nvida-uvm
-        // if this container no longer has access to any GPUs.
-        if (info->allocated.empty()) {
-          map<string, const cgroups::devices::Entry*> entries = {
-            { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
-            { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
-          };
-
-          foreachkey (const string& device, entries) {
-            Try<Nothing> deny = cgroups::devices::deny(
-                hierarchy, info->cgroup, *entries[device]);
-
-            if (deny.isError()) {
-              return Failure("Failed to deny cgroups access to"
-                             " '" + device + "': " + deny.error());
-            }
-          }
-        }
-
-        return Nothing();
-      });
+    return allocator->deallocate(deallocated);
   }
 
   return Nothing();
