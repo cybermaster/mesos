@@ -42,7 +42,7 @@
 
 #include "slave/containerizer/mesos/isolator.hpp"
 
-#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
+#include "slave/containerizer/mesos/isolators/gpu/isolator.hpp"
 #include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
 
 using cgroups::devices::Entry;

@@ -1033,12 +1033,13 @@ MESOS_NETWORK_ISOLATOR_FILES +=						\
 
 MESOS_NVIDIA_GPU_ISOLATOR_FILES =					\
   slave/containerizer/mesos/isolators/gpu/allocator.cpp			\
-  slave/containerizer/mesos/isolators/gpu/nvidia.cpp			\
+  slave/containerizer/mesos/isolators/gpu/isolator.cpp			\
   slave/containerizer/mesos/isolators/gpu/nvml.cpp
 
 MESOS_NVIDIA_GPU_ISOLATOR_FILES +=					\
   slave/containerizer/mesos/isolators/gpu/allocator.hpp			\
-  slave/containerizer/mesos/isolators/gpu/components.hpp		\
+  slave/containerizer/mesos/isolators/gpu/components.hpp 		\
+  slave/containerizer/mesos/isolators/gpu/isolator.hpp 			\
   slave/containerizer/mesos/isolators/gpu/nvidia.hpp 			\
   slave/containerizer/mesos/isolators/gpu/nvml.hpp
 

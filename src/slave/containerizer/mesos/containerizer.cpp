@@ -53,13 +53,6 @@
 #include "slave/containerizer/mesos/linux_launcher.hpp"
 #endif
 
-#ifdef ENABLE_NVIDIA_GPU_SUPPORT
-#ifdef __linux__
-#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
-#endif
-#endif
-#include "slave/containerizer/mesos/isolators/gpu/components.hpp"
-
 #include "slave/containerizer/mesos/isolators/posix.hpp"
 
 #include "slave/containerizer/mesos/isolators/posix/disk.hpp"
@@ -90,6 +83,8 @@
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/filesystem/shared.hpp"
 #endif
+
+#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 
 #ifdef __linux__
 #include "slave/containerizer/mesos/isolators/namespaces/pid.hpp"
