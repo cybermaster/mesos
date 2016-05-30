@@ -19,8 +19,6 @@
 
 #include <list>
 
-#include <nvidia/gdk/nvml.h>
-
 #include <process/future.hpp>
 
 #include <stout/hashmap.hpp>
@@ -30,6 +28,8 @@
 #include "slave/flags.hpp"
 
 #include "slave/containerizer/mesos/isolator.hpp"
+
+#include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
 
 namespace mesos {
 namespace internal {
@@ -98,15 +98,6 @@ public:
       const ContainerID& containerId);
 
 private:
-  // TODO(klueska): Consider exposing this as a generic
-  // device type in a library (possibly cgroups or stout?).
-  struct Gpu
-  {
-    nvmlDevice_t handle;
-    unsigned int major;
-    unsigned int minor;
-  };
-
   struct Info
   {
     Info(const ContainerID& _containerId, const std::string& _cgroup)
@@ -120,7 +111,7 @@ private:
   NvidiaGpuIsolatorProcess(
       const Flags& _flags,
       const std::string& hierarchy,
-      std::list<Gpu> gpus);
+      const process::Shared<NvidiaGpuAllocator>& allocator);
 
   process::Future<Nothing> _cleanup(
       const ContainerID& containerId,
@@ -134,7 +125,7 @@ private:
   // TODO(bmahler): Use Owned<Info>.
   hashmap<ContainerID, Info*> infos;
 
-  std::list<Gpu> available;
+  process::Shared<NvidiaGpuAllocator> allocator;
 };
 
 } // namespace slave {

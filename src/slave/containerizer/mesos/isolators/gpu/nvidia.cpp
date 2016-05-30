@@ -25,6 +25,7 @@
 #include <process/collect.hpp>
 #include <process/defer.hpp>
 #include <process/future.hpp>
+#include <process/shared.hpp>
 
 #include <stout/error.hpp>
 #include <stout/foreach.hpp>
@@ -57,6 +58,7 @@ using mesos::internal::slave::Containerizer;
 using process::Failure;
 using process::Future;
 using process::PID;
+using process::Shared;
 
 using std::list;
 using std::map;
@@ -108,67 +110,23 @@ static const char* DEFAULT_WHITELIST_ENTRIES[] = {
 NvidiaGpuIsolatorProcess::NvidiaGpuIsolatorProcess(
     const Flags& _flags,
     const string& _hierarchy,
-    list<Gpu> gpus)
+    const Shared<NvidiaGpuAllocator>& _allocator)
   : flags(_flags),
     hierarchy(_hierarchy),
-    available(gpus) {}
+    allocator(_allocator) {}
 
 
 Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
 {
-  Try<Nothing> initialized = NvidiaManagementLibrary::initialize();
-  if (initialized.isError()) {
-    return Error(initialized.error());
+  // Create an `NvidiaGpuAllocator` instance. Eventually this
+  // should be moved above this component so that it can be
+  // shared with the docker containerizer.
+  Try<NvidiaGpuAllocator*> _allocator = NvidiaGpuAllocator::create(flags);
+  if (_allocator.isError()) {
+    return Error(_allocator.error());
   }
 
-  // Grab the full list of resources computed for this containerizer
-  // and filter it down to just the GPU resources.
-  //
-  // TODO(klueska): This is a really heavy-weight way of getting at
-  // the number of GPU resources we are supposed to manage. However,
-  // it is better than duplicating the large amount of code it takes
-  // to do the GPU enumeration here, including all of the error
-  // handling. We need to figure out a better architecture for sharing
-  // the GPU enumeration code here.
-  Try<Resources> resources = Containerizer::resources(flags);
-  if (resources.isError()) {
-    return Error(resources.error());
-  }
-
-  // Figure out the list of GPUs to make available by their index.
-  vector<unsigned int> indices;
-
-  if (flags.nvidia_gpu_devices.isSome()) {
-    indices = flags.nvidia_gpu_devices.get();
-  } else if (resources->gpus().isSome()) {
-    for (unsigned int i = 0; i < resources->gpus().get(); ++i) {
-      indices.push_back(i);
-    }
-  }
-
-  // Build the list of available GPUs using the ids computed above.
-  list<Gpu> gpus;
-
-  foreach (unsigned int index, indices) {
-    const NvidiaManagementLibrary& nvml = NvidiaManagementLibrary::nvml();
-
-    Try<nvmlDevice_t> handle = nvml.deviceGetHandleByIndex(index);
-    if (handle.isError()) {
-      return Error(handle.error());
-    }
-
-    Try<unsigned int> minor = nvml.deviceGetMinorNumber(handle.get());
-    if (minor.isError()) {
-      return Error(minor.error());
-    }
-
-    Gpu gpu;
-    gpu.handle = handle.get();
-    gpu.major = NVIDIA_MAJOR_DEVICE;
-    gpu.minor = minor.get();
-
-    gpus.push_back(gpu);
-  }
+  Shared<NvidiaGpuAllocator> allocator(_allocator.get());
 
   // Populate the device entries for
   // `/dev/nvidiactl` and `/dev/nvidia-uvm`.
@@ -227,7 +185,7 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
   }
 
   process::Owned<MesosIsolatorProcess> process(
-      new NvidiaGpuIsolatorProcess(flags, hierarchy.get(), gpus));
+      new NvidiaGpuIsolatorProcess(flags, hierarchy.get(), allocator));
 
   return new MesosIsolator(process);
 }
@@ -237,6 +195,8 @@ Future<Nothing> NvidiaGpuIsolatorProcess::recover(
     const list<ContainerState>& states,
     const hashset<ContainerID>& orphans)
 {
+  list<Future<Nothing>> futures;
+
   foreach (const ContainerState& state, states) {
     const ContainerID& containerId = state.container_id();
     const string cgroup = path::join(flags.cgroups_root, containerId.value());
@@ -271,57 +231,68 @@ Future<Nothing> NvidiaGpuIsolatorProcess::recover(
                      " '" + cgroup + "': " + entries.error());
     }
 
+    const list<Gpu> allGpus = allocator->allGpus();
+
+    list<Gpu> containerGpus;
     foreach (const cgroups::devices::Entry& entry, entries.get()) {
-      for (auto gpu = available.begin(); gpu != available.end(); ++gpu) {
+      for (auto gpu = allGpus.begin(); gpu != allGpus.end(); ++gpu) {
         if (entry.selector.major == gpu->major &&
             entry.selector.minor == gpu->minor) {
-          infos[containerId]->allocated.push_back(*gpu);
-          available.erase(gpu);
+          containerGpus.push_back(*gpu);
           break;
         }
       }
     }
+
+    futures.push_back(allocator->allocate(containerGpus)
+      .then([=] () -> Future<Nothing> {
+        infos[containerId]->allocated = containerGpus;
+        return Nothing();
+      }));
   }
 
-  // Remove orphan cgroups.
-  Try<vector<string>> cgroups = cgroups::get(hierarchy, flags.cgroups_root);
-  if (cgroups.isError()) {
-    foreachvalue (Info* info, infos) {
-      delete info;
-    }
-    infos.clear();
-    return Failure(cgroups.error());
-  }
+  return collect(futures)
+    .then([=] () -> Future<Nothing> {
+      // Remove orphan cgroups.
+      Try<vector<string>> cgroups = cgroups::get(hierarchy, flags.cgroups_root);
+      if (cgroups.isError()) {
+        foreachvalue (Info* info, infos) {
+          delete info;
+        }
+        infos.clear();
+        return Failure(cgroups.error());
+      }
 
-  foreach (const string& cgroup, cgroups.get()) {
-    // Ignore the slave cgroup (see the --agent_subsystems flag).
-    // TODO(idownes): Remove this when the cgroups layout is updated,
-    // see MESOS-1185.
-    if (cgroup == path::join(flags.cgroups_root, "slave")) {
-      continue;
-    }
+      foreach (const string& cgroup, cgroups.get()) {
+        // Ignore the slave cgroup (see the --agent_subsystems flag).
+        // TODO(idownes): Remove this when the cgroups layout is updated,
+        // see MESOS-1185.
+        if (cgroup == path::join(flags.cgroups_root, "slave")) {
+          continue;
+        }
 
-    ContainerID containerId;
-    containerId.set_value(Path(cgroup).basename());
+        ContainerID containerId;
+        containerId.set_value(Path(cgroup).basename());
 
-    if (infos.contains(containerId)) {
-      continue;
-    }
+        if (infos.contains(containerId)) {
+          continue;
+        }
 
-    // Known orphan cgroups will be destroyed by the containerizer
-    // using the normal cleanup path. See MESOS-2367 for details.
-    if (orphans.contains(containerId)) {
-      infos[containerId] = new Info(containerId, cgroup);
-      continue;
-    }
+        // Known orphan cgroups will be destroyed by the containerizer
+        // using the normal cleanup path. See MESOS-2367 for details.
+        if (orphans.contains(containerId)) {
+          infos[containerId] = new Info(containerId, cgroup);
+          continue;
+        }
 
-    LOG(INFO) << "Removing unknown orphaned cgroup '" << cgroup << "'";
+        LOG(INFO) << "Removing unknown orphaned cgroup '" << cgroup << "'";
 
-    // We don't wait on the destroy as we don't want to block recovery.
-    cgroups::destroy(hierarchy, cgroup, cgroups::DESTROY_TIMEOUT);
-  }
+        // We don't wait on the destroy as we don't want to block recovery.
+        cgroups::destroy(hierarchy, cgroup, cgroups::DESTROY_TIMEOUT);
+      }
 
-  return Nothing();
+      return Nothing();
+    });
 }
 
 
@@ -471,54 +442,58 @@ Future<Nothing> NvidiaGpuIsolatorProcess::update(
   if (requested > info->allocated.size()) {
     size_t additional = requested - info->allocated.size();
 
-    if (additional > available.size()) {
-      return Failure("Not enough GPUs available to reserve"
-                     " " + stringify(additional) + " additional GPUs");
-    }
-
-    // Grant access to /dev/nvidiactl and /dev/nvida-uvm
-    // if this container is about to get its first GPU.
-    if (info->allocated.empty()) {
-      map<string, const cgroups::devices::Entry*> entries = {
-        { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
-        { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
-      };
-
-      foreachkey (const string& device, entries) {
-        Try<Nothing> allow = cgroups::devices::allow(
-            hierarchy, info->cgroup, *entries[device]);
-
-        if (allow.isError()) {
-          return Failure("Failed to grant cgroups access to"
-                         " '" + device + "': " + allow.error());
+    return allocator->allocate(additional)
+      .then([=] (Option<list<Gpu>> allocated) -> Future<Nothing> {
+        if (!allocated.isSome()) {
+          return Failure("Not enough GPUs available to reserve"
+                         " " + stringify(additional) + " additional GPUs");
         }
-      }
-    }
 
-    for (size_t i = 0; i < additional; i++) {
-      const Gpu& gpu = available.front();
+        // Grant access to /dev/nvidiactl and /dev/nvida-uvm
+        // if this container is about to get its first GPU.
+        if (info->allocated.empty()) {
+          map<string, const cgroups::devices::Entry*> entries = {
+            { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
+            { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
+          };
 
-      cgroups::devices::Entry entry;
-      entry.selector.type = Entry::Selector::Type::CHARACTER;
-      entry.selector.major = gpu.major;
-      entry.selector.minor = gpu.minor;
-      entry.access.read = true;
-      entry.access.write = true;
-      entry.access.mknod = true;
+          foreachkey (const string& device, entries) {
+            Try<Nothing> allow = cgroups::devices::allow(
+                hierarchy, info->cgroup, *entries[device]);
 
-      Try<Nothing> allow = cgroups::devices::allow(
-          hierarchy, info->cgroup, entry);
+            if (allow.isError()) {
+              return Failure("Failed to grant cgroups access to"
+                             " '" + device + "': " + allow.error());
+            }
+          }
+        }
 
-      if (allow.isError()) {
-        return Failure("Failed to grant cgroups access to GPU device"
-                       " '" + stringify(entry) + "': " + allow.error());
-      }
+        foreach (const Gpu& gpu, allocated.get()) {
+          cgroups::devices::Entry entry;
+          entry.selector.type = Entry::Selector::Type::CHARACTER;
+          entry.selector.major = gpu.major;
+          entry.selector.minor = gpu.minor;
+          entry.access.read = true;
+          entry.access.write = true;
+          entry.access.mknod = true;
 
-      info->allocated.push_back(gpu);
-      available.pop_front();
-    }
+          Try<Nothing> allow = cgroups::devices::allow(
+              hierarchy, info->cgroup, entry);
+
+          if (allow.isError()) {
+            return Failure("Failed to grant cgroups access to GPU device"
+                           " '" + stringify(entry) + "': " + allow.error());
+          }
+        }
+
+        info->allocated = allocated.get();
+
+        return Nothing();
+      });
   } else if (requested < info->allocated.size()) {
     size_t fewer = info->allocated.size() - requested;
+
+    list<Gpu> deallocated;
 
     for (size_t i = 0; i < fewer; i++) {
       const Gpu& gpu = info->allocated.front();
@@ -539,28 +514,33 @@ Future<Nothing> NvidiaGpuIsolatorProcess::update(
                        " '" + stringify(entry) + "': " + deny.error());
       }
 
+      deallocated.push_back(gpu);
       info->allocated.pop_front();
-      available.push_back(gpu);
     }
 
-    // Revoke access from /dev/nvidiactl and /dev/nvida-uvm
-    // if this container no longer has access to any GPUs.
-    if (info->allocated.empty()) {
-      map<string, const cgroups::devices::Entry*> entries = {
-        { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
-        { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
-      };
+    return allocator->deallocate(deallocated)
+      .then([=] () -> Future<Nothing> {
+        // Revoke access from /dev/nvidiactl and /dev/nvida-uvm
+        // if this container no longer has access to any GPUs.
+        if (info->allocated.empty()) {
+          map<string, const cgroups::devices::Entry*> entries = {
+            { "/dev/nvidiactl", NVIDIA_CTL_DEVICE_ENTRY },
+            { "/dev/nvidia-uvm", NVIDIA_UVM_DEVICE_ENTRY },
+          };
 
-      foreachkey (const string& device, entries) {
-        Try<Nothing> deny = cgroups::devices::deny(
-            hierarchy, info->cgroup, *entries[device]);
+          foreachkey (const string& device, entries) {
+            Try<Nothing> deny = cgroups::devices::deny(
+                hierarchy, info->cgroup, *entries[device]);
 
-        if (deny.isError()) {
-          return Failure("Failed to deny cgroups access to"
-                         " '" + device + "': " + deny.error());
+            if (deny.isError()) {
+              return Failure("Failed to deny cgroups access to"
+                             " '" + device + "': " + deny.error());
+            }
+          }
         }
-      }
-    }
+
+        return Nothing();
+      });
   }
 
   return Nothing();
@@ -614,19 +594,20 @@ Future<Nothing> NvidiaGpuIsolatorProcess::_cleanup(
 
   Info* info = CHECK_NOTNULL(infos[containerId]);
 
-  // Make any remaining GPUs available.
-  available.splice(available.end(), info->allocated);
+  Future<Nothing> deallocate = allocator->deallocate(info->allocated);
 
-  if (!future.isReady()) {
-    return Failure(
-        "Failed to clean up container " + stringify(containerId) + ": " +
-        (future.isFailed() ? future.failure() : "discarded"));
-  }
+  return collect(future, deallocate)
+    .onFailed([=] (const string& message) -> Future<Nothing> {
+      return Failure(
+          "Failed to clean up container " +
+          stringify(containerId) + ": " + message);
+    })
+    .then([=] () -> Future<Nothing> {
+      delete info;
+      infos.erase(containerId);
 
-  delete info;
-  infos.erase(containerId);
-
-  return Nothing();
+      return Nothing();
+    });
 }
 
 } // namespace slave {
