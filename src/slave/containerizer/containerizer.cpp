@@ -47,6 +47,7 @@
 #include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
 #include "slave/containerizer/mesos/isolators/gpu/nvml.hpp"
 #endif // ENABLE_NVIDIA_GPU_SUPPORT
+#include "slave/containerizer/mesos/isolators/gpu/components.hpp"
 
 using std::map;
 using std::string;
@@ -210,6 +211,21 @@ Try<Containerizer*> Containerizer::create(
     return containerizer.get();
   }
 
+  // Create an optional `NvidiaComponents` instance
+  // to pass into the mesos and docker containerizers.
+  Option<NvidiaComponents> nvidia;
+#if ENABLE_NVIDIA_GPU_SUPPORT
+  if (NvidiaManagementLibrary::isAvailable()) {
+    Try<NvidiaGpuAllocator*> allocator = NvidiaGpuAllocator::create(flags);
+    if (allocator.isError()) {
+      return Error(allocator.error());
+    }
+
+    nvidia = NvidiaComponents();
+    nvidia->allocator = Shared<NvidiaGpuAllocator>(allocator.get());
+  }
+#endif
+
   // TODO(benh): We need to store which containerizer or
   // containerizers were being used. See MESOS-1663.
 
@@ -219,7 +235,7 @@ Try<Containerizer*> Containerizer::create(
   foreach (const string& type, strings::split(flags.containerizers, ",")) {
     if (type == "mesos") {
       Try<MesosContainerizer*> containerizer =
-        MesosContainerizer::create(flags, local, fetcher);
+        MesosContainerizer::create(flags, local, fetcher, nvidia);
       if (containerizer.isError()) {
         return Error("Could not create MesosContainerizer: " +
                      containerizer.error());
@@ -228,7 +244,7 @@ Try<Containerizer*> Containerizer::create(
       }
     } else if (type == "docker") {
       Try<DockerContainerizer*> containerizer =
-        DockerContainerizer::create(flags, fetcher);
+        DockerContainerizer::create(flags, fetcher, nvidia);
       if (containerizer.isError()) {
         return Error("Could not create DockerContainerizer: " +
                      containerizer.error());

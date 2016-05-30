@@ -116,17 +116,14 @@ NvidiaGpuIsolatorProcess::NvidiaGpuIsolatorProcess(
     allocator(_allocator) {}
 
 
-Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
+Try<Isolator*> NvidiaGpuIsolatorProcess::create(
+    const Flags& flags,
+    const Option<NvidiaComponents>& components)
 {
-  // Create an `NvidiaGpuAllocator` instance. Eventually this
-  // should be moved above this component so that it can be
-  // shared with the docker containerizer.
-  Try<NvidiaGpuAllocator*> _allocator = NvidiaGpuAllocator::create(flags);
-  if (_allocator.isError()) {
-    return Error(_allocator.error());
+  if (components.isNone()) {
+    return Error("Cannot create an `NvidiaGpuIsolatorProcess`"
+                 " when `Option<NvidiaComponents>` is None()");
   }
-
-  Shared<NvidiaGpuAllocator> allocator(_allocator.get());
 
   // Populate the device entries for
   // `/dev/nvidiactl` and `/dev/nvidia-uvm`.
@@ -185,7 +182,10 @@ Try<Isolator*> NvidiaGpuIsolatorProcess::create(const Flags& flags)
   }
 
   process::Owned<MesosIsolatorProcess> process(
-      new NvidiaGpuIsolatorProcess(flags, hierarchy.get(), allocator));
+      new NvidiaGpuIsolatorProcess(
+          flags,
+          hierarchy.get(),
+          components->allocator));
 
   return new MesosIsolator(process);
 }

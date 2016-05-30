@@ -58,6 +58,7 @@
 #include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
 #endif
 #endif
+#include "slave/containerizer/mesos/isolators/gpu/components.hpp"
 
 #include "slave/containerizer/mesos/isolators/posix.hpp"
 
@@ -133,7 +134,8 @@ const char MESOS_CONTAINERIZER[] = "mesos-containerizer";
 Try<MesosContainerizer*> MesosContainerizer::create(
     const Flags& flags,
     bool local,
-    Fetcher* fetcher)
+    Fetcher* fetcher,
+    const Option<NvidiaComponents>& nvidia)
 {
   // Modify `flags` based on the deprecated `isolation` flag (and then
   // use `flags_` in the rest of this function).
@@ -263,7 +265,10 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},
 #ifdef ENABLE_NVIDIA_GPU_SUPPORT
-    {"gpu/nvidia", &NvidiaGpuIsolatorProcess::create},
+    {"gpu/nvidia",
+     [&nvidia] (const Flags& flags) {
+       return NvidiaGpuIsolatorProcess::create(flags, nvidia);
+     }},
 #endif
     {"namespaces/pid", &NamespacesPidIsolatorProcess::create},
     {"network/cni", &NetworkCniIsolatorProcess::create},

@@ -30,6 +30,7 @@
 #include "slave/containerizer/mesos/isolator.hpp"
 
 #include "slave/containerizer/mesos/isolators/gpu/allocator.hpp"
+#include "slave/containerizer/mesos/isolators/gpu/components.hpp"
 
 namespace mesos {
 namespace internal {
@@ -73,7 +74,9 @@ namespace slave {
 class NvidiaGpuIsolatorProcess : public MesosIsolatorProcess
 {
 public:
-  static Try<mesos::slave::Isolator*> create(const Flags& flags);
+  static Try<mesos::slave::Isolator*> create(
+      const Flags& flags,
+      const Option<NvidiaComponents>& components);
 
   virtual process::Future<Nothing> recover(
       const std::list<mesos::slave::ContainerState>& states,
